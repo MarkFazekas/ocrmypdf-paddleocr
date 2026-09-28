@@ -259,11 +259,14 @@ and model downloads are large.
 
 ## PyPI release
 
-Releases use GitHub Actions + PyPI Trusted Publishing, so no long-lived PyPI
-API token needs to be stored in GitHub.
+Releases are manual but fully automated: open **Actions -> Release -> Run
+workflow**, select the `main` branch, enter a version such as `0.2.0`, and
+run it. The workflow tests the code, creates the Git tag, builds and validates
+the package, publishes through PyPI Trusted Publishing, creates the GitHub
+Release, and attaches the wheel/sdist.
 
-See [RELEASING.md](RELEASING.md) for the one-time Trusted Publisher setup,
-tagging process, package validation, and release checklist.
+See [RELEASING.md](RELEASING.md) for the one-time `main` default-branch and
+PyPI Trusted Publisher setup.
 
 The distribution name is:
 
