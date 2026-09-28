@@ -1,18 +1,21 @@
 [build-system]
-requires = ["setuptools>=45", "setuptools_scm[toml]>=6.2", "wheel"]
+requires = ["setuptools>=77", "setuptools_scm[toml]>=8", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "ocrmypdf-paddleocr"
+name = "ocrmypdf-paddleocr-plus"
 dynamic = ["version"]
-description = "PaddleOCR plugin for OCRmyPDF"
+description = "PaddleOCR plugin for OCRmyPDF with batched inference and multilingual Devanagari support"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.11"
 license = {text = "MPL-2.0"}
 authors = [
-    {name = "Your Name", email = "your.email@example.com"}
+    {name = "OCRmyPDF-PaddleOCR contributors"}
 ]
-keywords = ["ocr", "pdf", "paddleocr", "ocrmypdf"]
+maintainers = [
+    {name = "Márk Fazekas"}
+]
+keywords = ["ocr", "pdf", "paddleocr", "ocrmypdf", "hindi", "sanskrit", "devanagari"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: End Users/Desktop",
@@ -20,25 +23,33 @@ classifiers = [
     "License :: OSI Approved :: Mozilla Public License 2.0 (MPL 2.0)",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Multimedia :: Graphics :: Capture :: Scanners",
     "Topic :: Scientific/Engineering :: Image Recognition",
 ]
 dependencies = [
-    "ocrmypdf>=14.0.0",
-    "paddlepaddle>=2.5.0",
-    "paddleocr>=2.7.0",
-    "pillow>=9.0.0",
+    "ocrmypdf>=17,<18",
+    "paddlepaddle>=3.2,<3.3",
+    "paddleocr>=3.7,<4",
+    "pillow>=10",
+]
+
+[project.optional-dependencies]
+vl = [
+    "paddleocr[doc-parser]>=3.7,<4",
+]
+dev = [
+    "build>=1.2",
+    "pytest>=8",
+    "twine>=6",
 ]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/ocrmypdf-paddleocr"
-Repository = "https://github.com/yourusername/ocrmypdf-paddleocr"
-"Bug Tracker" = "https://github.com/yourusername/ocrmypdf-paddleocr/issues"
+Homepage = "https://github.com/MarkFazekas/ocrmypdf-paddleocr"
+Repository = "https://github.com/MarkFazekas/ocrmypdf-paddleocr"
+Issues = "https://github.com/MarkFazekas/ocrmypdf-paddleocr/issues"
+Upstream = "https://github.com/clefru/ocrmypdf-paddleocr"
 
 [project.entry-points.ocrmypdf]
 paddleocr = "ocrmypdf_paddleocr.plugin"
@@ -51,3 +62,4 @@ where = ["src"]
 
 [tool.setuptools_scm]
 write_to = "src/ocrmypdf_paddleocr/_version.py"
+fallback_version = "0.2.0.dev0"
