@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+import warnings
 from concurrent.futures import Future
 from pathlib import Path
 
@@ -12,6 +13,20 @@ from PIL import Image
 
 from ocrmypdf import hookimpl
 from ocrmypdf.pluginspec import OcrEngine, OrientationConfidence
+
+from .model_profiles import (
+    LANGUAGE_MAP as PADDLE_LANGUAGE_MAP,
+    SUPPORTED_LANGUAGE_CODES,
+    select_model_profile,
+)
+
+# Paddle emits this when optional ccache is absent. It is irrelevant for normal
+# inference and otherwise pollutes OCRmyPDF's progress display.
+warnings.filterwarnings(
+    "ignore",
+    message=r"No ccache found.*",
+    category=UserWarning,
+)
 
 try:
     from paddleocr import PaddleOCR
@@ -95,6 +110,17 @@ class _PaddleOCRBatchService:
                     future.set_result([result])
 
 
+def _configure_paddle_logging(options):
+    """Keep Paddle/PaddleX logs quiet unless explicitly requested."""
+    try:
+        from paddlex.utils import logging as paddlex_logging
+    except ImportError:
+        return
+    paddlex_logging.setup_logging(
+        "INFO" if getattr(options, "paddle_show_log", False) else "WARNING"
+    )
+
+
 def _batch_configuration(options):
     engine = getattr(options, 'paddle_engine', 'classic')
     batch_size = getattr(options, 'paddle_batch_size', None)
@@ -102,10 +128,19 @@ def _batch_configuration(options):
         from ocrmypdf.helpers import available_cpu_count
         batch_size = max(1, (getattr(options, 'jobs', None) or available_cpu_count()) // 2)
 
+    profile = PaddleOCREngine._get_model_profile(options)
     model_key = (
         engine,
-        PaddleOCREngine._get_paddle_lang(options),
+        profile.requested_languages,
+        profile.paddle_lang,
+        profile.ocr_version,
+        profile.detection_model_name,
+        profile.recognition_model_name,
         bool(getattr(options, 'paddle_use_gpu', False)),
+        bool(getattr(options, 'paddle_enable_mkldnn', False)),
+        getattr(options, 'paddle_cpu_threads', None),
+        getattr(options, 'paddle_det_model', None),
+        getattr(options, 'paddle_rec_model', None),
         getattr(options, 'paddle_det_model_dir', None),
         getattr(options, 'paddle_rec_model_dir', None),
         getattr(options, 'paddle_cls_model_dir', None),
@@ -177,7 +212,37 @@ def add_options(parser):
         '--paddle-batch-size',
         type=int,
         metavar='N',
-        help='Maximum pages per PaddleOCR batch (default: --jobs)',
+        help='Maximum pages per PaddleOCR batch (default: max(--jobs // 2, 1))',
+    )
+    paddle.add_argument(
+        '--paddle-cpu-threads',
+        type=int,
+        metavar='N',
+        help='Paddle inference threads on CPU (default: PaddleOCR default)',
+    )
+    paddle.add_argument(
+        '--paddle-enable-mkldnn',
+        action='store_true',
+        help=(
+            'Enable oneDNN/MKLDNN on CPU. Disabled by default because some '
+            'Paddle versions spam ReduceMeanCheckIfOneDNNSupport and have '
+            'oneDNN compatibility issues.'
+        ),
+    )
+    paddle.add_argument(
+        '--paddle-ocr-version',
+        metavar='VERSION',
+        help='Override PaddleOCR model family, e.g. PP-OCRv5 or PP-OCRv6',
+    )
+    paddle.add_argument(
+        '--paddle-det-model',
+        metavar='NAME',
+        help='Override PaddleOCR text detection model name',
+    )
+    paddle.add_argument(
+        '--paddle-rec-model',
+        metavar='NAME',
+        help='Override PaddleOCR text recognition model name',
     )
     paddle.add_argument(
         '--paddle-det-model-dir',
@@ -209,6 +274,14 @@ def check_options(options):
     batch_size = getattr(options, 'paddle_batch_size', None)
     if batch_size is not None and batch_size < 1:
         raise BadArgsError("--paddle-batch-size must be at least 1")
+    cpu_threads = getattr(options, 'paddle_cpu_threads', None)
+    if cpu_threads is not None and cpu_threads < 1:
+        raise BadArgsError("--paddle-cpu-threads must be at least 1")
+
+    try:
+        PaddleOCREngine._get_model_profile(options)
+    except ValueError as exc:
+        raise BadArgsError(str(exc)) from exc
 
     engine = getattr(options, 'paddle_engine', 'classic')
     if engine == 'vl':
@@ -300,25 +373,8 @@ def _group_words_into_lines(word_boxes):
 class PaddleOCREngine(OcrEngine):
     """Implements OCR with PaddleOCR."""
 
-    # Mapping from Tesseract/OCRmyPDF language codes to PaddleOCR codes
-    LANGUAGE_MAP = {
-        'eng': 'en',
-        'chi_sim': 'ch',
-        'chi_tra': 'chinese_cht',
-        'fra': 'fr',
-        'deu': 'german',
-        'jpn': 'japan',
-        'kor': 'korean',
-        'spa': 'spanish',
-        'rus': 'ru',
-        'ara': 'ar',
-        'hin': 'hi',
-        'por': 'pt',
-        'ita': 'it',
-        'tur': 'tr',
-        'vie': 'vi',
-        'tha': 'th',
-    }
+    # Public compatibility alias used by older code/tests.
+    LANGUAGE_MAP = PADDLE_LANGUAGE_MAP
 
     @staticmethod
     def version():
@@ -343,25 +399,27 @@ class PaddleOCREngine(OcrEngine):
 
     @staticmethod
     def languages(options):
-        """Return the set of all languages supported by PaddleOCR."""
-        # PaddleOCR supports many languages - return a comprehensive list
-        return {
-            'en', 'ch', 'chinese_cht', 'ta', 'te', 'ka', 'latin', 'ar', 'cy', 'da',
-            'de', 'es', 'et', 'fr', 'ga', 'hi', 'it', 'ja', 'ko', 'la', 'nl', 'no',
-            'oc', 'pt', 'ro', 'ru', 'sr', 'sv', 'tr', 'uk', 'vi',
-            # Also include common Tesseract codes for compatibility
-            'eng', 'chi_sim', 'chi_tra', 'deu', 'fra', 'spa', 'rus', 'jpn', 'kor'
-        }
+        """Return language codes accepted by the plugin."""
+        return set(SUPPORTED_LANGUAGE_CODES)
+
+    @staticmethod
+    def _get_model_profile(options):
+        """Resolve OCRmyPDF languages to one PaddleOCR model profile."""
+        return select_model_profile(
+            getattr(options, 'languages', None),
+            explicit_ocr_version=getattr(options, 'paddle_ocr_version', None),
+            explicit_recognition_model_name=getattr(options, 'paddle_rec_model', None),
+        )
 
     @staticmethod
     def _get_paddle_lang(options):
-        """Convert OCRmyPDF language to PaddleOCR language."""
-        if not options.languages:
-            return 'en'
+        """Return the primary PaddleOCR language hint."""
+        return PaddleOCREngine._get_model_profile(options).paddle_lang
 
-        # Use first language
-        lang = options.languages[0].lower()
-        return PaddleOCREngine.LANGUAGE_MAP.get(lang, lang)
+    @staticmethod
+    def _get_hocr_lang(options):
+        """Return a useful OCRmyPDF/Tesseract language code for hOCR metadata."""
+        return PaddleOCREngine._get_model_profile(options).hocr_language
 
     @staticmethod
     def _get_paddle_ocr(options):
@@ -375,34 +433,67 @@ class PaddleOCREngine(OcrEngine):
             log.warning(f"Removing OMP_THREAD_LIMIT={saved_omp_limit} set by Tesseract plugin")
             del os.environ['OMP_THREAD_LIMIT']
 
-        paddle_lang = PaddleOCREngine._get_paddle_lang(options)
-        log.debug(f"Initializing PaddleOCR with language: {paddle_lang}")
+        _configure_paddle_logging(options)
+        profile = PaddleOCREngine._get_model_profile(options)
+        log.debug(
+            "Initializing PaddleOCR profile=%s languages=%s",
+            profile.profile_name,
+            "+".join(profile.requested_languages),
+        )
 
         kwargs = {
             # Disable textline orientation - not needed for most documents
             'use_textline_orientation': False,
-            'lang': paddle_lang,
             # Disable document unwarping - coordinates must match original image
             'use_doc_unwarping': False,
             # Disable orientation classification - OCRmyPDF handles page rotation
             'use_doc_orientation_classify': False,
         }
 
-        # Set device for GPU/CPU
-        if getattr(options, 'paddle_use_gpu', False):
-            kwargs['device'] = 'gpu'
-        else:
-            kwargs['device'] = 'cpu'
+        use_gpu = bool(getattr(options, 'paddle_use_gpu', False))
+        kwargs['device'] = 'gpu' if use_gpu else 'cpu'
+        if not use_gpu:
+            # PaddleOCR defaults to oneDNN/MKLDNN on CPU. PaddlePaddle 3.2/3.3
+            # can emit massive ReduceMeanCheckIfOneDNNSupport output (and 3.3.x
+            # has seen compatibility failures), so quiet/stable mode is default.
+            kwargs['enable_mkldnn'] = bool(
+                getattr(options, 'paddle_enable_mkldnn', False)
+            )
+            cpu_threads = getattr(options, 'paddle_cpu_threads', None)
+            if cpu_threads is not None:
+                kwargs['cpu_threads'] = cpu_threads
 
-        # Add model directories if specified
-        if hasattr(options, 'paddle_det_model_dir') and options.paddle_det_model_dir:
-            kwargs['text_detection_model_dir'] = options.paddle_det_model_dir
-        if hasattr(options, 'paddle_rec_model_dir') and options.paddle_rec_model_dir:
-            kwargs['text_recognition_model_dir'] = options.paddle_rec_model_dir
-        if hasattr(options, 'paddle_cls_model_dir') and options.paddle_cls_model_dir:
+        explicit_det = getattr(options, 'paddle_det_model', None)
+        explicit_rec = getattr(options, 'paddle_rec_model', None)
+        det_dir = getattr(options, 'paddle_det_model_dir', None)
+        rec_dir = getattr(options, 'paddle_rec_model_dir', None)
+
+        # Model names/directories make PaddleOCR ignore lang/ocr_version. Use
+        # either explicit model selection or the language/version resolver, not both.
+        has_explicit_model = any((explicit_det, explicit_rec, det_dir, rec_dir))
+        if has_explicit_model:
+            if explicit_det:
+                kwargs['text_detection_model_name'] = explicit_det
+            if explicit_rec:
+                kwargs['text_recognition_model_name'] = explicit_rec
+            if det_dir:
+                kwargs['text_detection_model_dir'] = det_dir
+            if rec_dir:
+                kwargs['text_recognition_model_dir'] = rec_dir
+        elif profile.detection_model_name or profile.recognition_model_name:
+            if profile.detection_model_name:
+                kwargs['text_detection_model_name'] = profile.detection_model_name
+            if profile.recognition_model_name:
+                kwargs['text_recognition_model_name'] = profile.recognition_model_name
+        else:
+            kwargs['lang'] = profile.paddle_lang
+            if profile.ocr_version:
+                kwargs['ocr_version'] = profile.ocr_version
+
+        if getattr(options, 'paddle_cls_model_dir', None):
             kwargs['textline_orientation_model_dir'] = options.paddle_cls_model_dir
 
-        log.debug(f"Creating PaddleOCR with kwargs: {kwargs}")
+        log.debug("Creating PaddleOCR with kwargs: %s", kwargs)
         return PaddleOCR(**kwargs)
 
     @staticmethod
@@ -476,9 +567,7 @@ class PaddleOCREngine(OcrEngine):
         result = _get_batch_service(options).predict(input_file)
 
         # Get language for hOCR
-        lang = PaddleOCREngine._get_paddle_lang(options)
-        lang_map_reverse = {v: k for k, v in PaddleOCREngine.LANGUAGE_MAP.items()}
-        hocr_lang = lang_map_reverse.get(lang, 'eng')
+        hocr_lang = PaddleOCREngine._get_hocr_lang(options)
 
         hocr_lines = [
             '<?xml version="1.0" encoding="UTF-8"?>',
@@ -702,10 +791,7 @@ class PaddleOCREngine(OcrEngine):
                                          f"scaling factors: x={scale_x:.4f}, y={scale_y:.4f}")
 
         # Get language for hOCR
-        lang = PaddleOCREngine._get_paddle_lang(options)
-        # Map back to Tesseract-style language codes for compatibility
-        lang_map_reverse = {v: k for k, v in PaddleOCREngine.LANGUAGE_MAP.items()}
-        hocr_lang = lang_map_reverse.get(lang, 'eng')
+        hocr_lang = PaddleOCREngine._get_hocr_lang(options)
 
         # Convert PaddleOCR 3.x output to hOCR
         hocr_lines = [
