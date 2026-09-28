@@ -14,7 +14,8 @@ def test_devanagari_profile_supports_english_hindi_sanskrit():
     assert profile.profile_name == "devanagari"
     assert profile.paddle_lang == "hi"
     assert profile.ocr_version == "PP-OCRv5"
-    assert profile.recognition_model_name is None
+    assert profile.detection_model_name == "PP-OCRv5_server_det"
+    assert profile.recognition_model_name == "devanagari_PP-OCRv5_mobile_rec"
     assert profile.hocr_language in {"hin", "san"}
 
 
@@ -22,6 +23,8 @@ def test_sanskrit_alone_uses_devanagari_profile():
     profile = select_model_profile(["san"])
     assert profile.paddle_lang == "sa"
     assert profile.ocr_version == "PP-OCRv5"
+    assert profile.detection_model_name == "PP-OCRv5_server_det"
+    assert profile.recognition_model_name == "devanagari_PP-OCRv5_mobile_rec"
 
 
 def test_english_keeps_default_profile():
