@@ -121,6 +121,7 @@ class ModelProfile:
     paddle_lang: str
     hocr_language: str
     ocr_version: str | None = None
+    detection_model_name: str | None = None
     recognition_model_name: str | None = None
     profile_name: str = "default"
 
@@ -203,7 +204,8 @@ def select_model_profile(
             # PaddleOCR 3.x natively maps PP-OCRv5 + a Devanagari language
             # to PP-OCRv5_server_det + devanagari_PP-OCRv5_mobile_rec.
             ocr_version=explicit_ocr_version or "PP-OCRv5",
-            recognition_model_name=None,
+            detection_model_name="PP-OCRv5_server_det",
+            recognition_model_name="devanagari_PP-OCRv5_mobile_rec",
             profile_name="devanagari",
         )
 
