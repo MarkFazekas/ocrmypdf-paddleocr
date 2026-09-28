@@ -188,14 +188,22 @@ def select_model_profile(
             ),
             primary,
         )
+        representative = next(
+            (
+                code
+                for code in requested
+                if code in DEVANAGARI_LANGUAGE_CODES
+            ),
+            "hin",
+        )
         return ModelProfile(
             requested_languages=requested,
-            # 'hi' is only the pipeline language hint. The explicit recognizer
-            # below supplies the multilingual character dictionary/model.
-            paddle_lang="hi",
+            paddle_lang=LANGUAGE_MAP.get(representative, representative),
             hocr_language=hocr_language,
+            # PaddleOCR 3.x natively maps PP-OCRv5 + a Devanagari language
+            # to PP-OCRv5_server_det + devanagari_PP-OCRv5_mobile_rec.
             ocr_version=explicit_ocr_version or "PP-OCRv5",
-            recognition_model_name="devanagari_PP-OCRv5_mobile_rec",
+            recognition_model_name=None,
             profile_name="devanagari",
         )
 
